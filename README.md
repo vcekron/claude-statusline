@@ -1,6 +1,6 @@
 # claude-statusline
 
-A custom status line provider for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Shows workspace info, model, context usage, API rate limit utilization, and extra usage costs — all in one line.
+A fast, minimal status line provider for [Claude Code](https://docs.anthropic.com/en/docs/claude-code), written in Rust. Shows workspace info, model, context usage, API rate limit utilization, and extra usage costs — all in one line.
 
 This is a personal tool. It's not flexible, not user-friendly, and configured via compile-time constants. If you want to use it, you'll need to read the source and adjust it yourself.
 
@@ -42,6 +42,15 @@ Point your Claude Code status line config at the binary:
     "command": "/path/to/claude-statusline"
   }
 }
+```
+
+## Performance
+
+~411 KB release binary. Benchmarked with [hyperfine](https://github.com/sharkdp/hyperfine) on Apple M4 Pro:
+
+```
+Time (mean ± σ):       9.5 ms ±   0.8 ms
+Range (min … max):     8.4 ms …  14.6 ms
 ```
 
 ## License
