@@ -1,4 +1,3 @@
-use chrono::{Local, TimeZone};
 use serde::Deserialize;
 use std::fs;
 use std::io::{self, Read};
@@ -20,9 +19,10 @@ const CURRENCY_SYMBOL: &str = "€";
 const CACHE_MAX_AGE: u64 = 180;
 const SEP: &str = " │ ";
 
-const BAR_FULL: &str = "██████████";
+const BAR_FULL: &[u8] = "██████████".as_bytes();
 const BAR_HALF: &str = "▓";
-const BAR_EMPTY: &str = "░░░░░░░░░░";
+const BAR_EMPTY: &[u8] = "░░░░░░░░░░".as_bytes();
+const BYTES_PER_BLOCK: usize = 3;
 
 #[derive(Deserialize, Default)]
 struct StdinInput {
@@ -138,11 +138,11 @@ fn read_cache(now: u64) -> UsageCache {
     let dir = cache_dir();
     let cache_file = dir.join("usage.cache");
 
-    let mut cache = if let Ok(contents) = fs::read_to_string(&cache_file) {
-        parse_cache_file(&contents)
-    } else {
-        UsageCache::default()
-    };
+    let existing = fs::read_to_string(&cache_file).ok();
+    let mut cache = existing
+        .as_deref()
+        .map(parse_cache_file)
+        .unwrap_or_default();
 
     let fresh = cache.timestamp > 0 && (now - cache.timestamp) < CACHE_MAX_AGE;
     if fresh {
@@ -156,17 +156,15 @@ fn read_cache(now: u64) -> UsageCache {
         .is_some_and(|exp| now < exp);
 
     if !locked {
-        if fetch_usage(now).is_ok() {
-            if let Ok(contents) = fs::read_to_string(&cache_file) {
-                cache = parse_cache_file(&contents);
-            }
+        if let Some(fetched) = fetch_usage(now) {
+            cache = fetched;
         }
     }
 
     cache
 }
 
-fn fetch_usage(now: u64) -> Result<(), ()> {
+fn fetch_usage(now: u64) -> Option<UsageCache> {
     let dir = cache_dir();
     let _ = fs::create_dir_all(&dir);
     let lock_file = dir.join("fetch.lock");
@@ -175,40 +173,46 @@ fn fetch_usage(now: u64) -> Result<(), ()> {
     let cred_output = Command::new("security")
         .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
         .output()
-        .map_err(|_| ())?;
+        .ok()?;
 
     if !cred_output.status.success() {
-        return Err(());
+        return None;
     }
 
-    let cred_json: serde_json::Value =
-        serde_json::from_slice(&cred_output.stdout).map_err(|_| ())?;
+    let cred_json: serde_json::Value = serde_json::from_slice(&cred_output.stdout).ok()?;
 
     let token = cred_json
         .get("claudeAiOauth")
         .and_then(|o| o.get("accessToken"))
         .and_then(|t| t.as_str())
-        .ok_or(())?;
+        .filter(|t| !t.is_empty())?;
 
-    if token.is_empty() {
-        return Err(());
+    let curl_output = Command::new("curl")
+        .args([
+            "-s",
+            "-w", "\n%{http_code}",
+            "-H", &format!("Authorization: Bearer {token}"),
+            "-H", "anthropic-beta: oauth-2025-04-20",
+            "https://api.anthropic.com/api/oauth/usage",
+        ])
+        .output()
+        .ok()?;
+
+    let raw = String::from_utf8_lossy(&curl_output.stdout);
+    let raw = raw.trim();
+
+    let (body_str, status) = raw.rsplit_once('\n')?;
+
+    if status == "429" {
+        let _ = fs::write(&lock_file, format!("{}", now + 300));
+        return None;
     }
 
-    let resp = ureq::get("https://api.anthropic.com/api/oauth/usage")
-        .header("Authorization", &format!("Bearer {token}"))
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .call();
+    if !status.starts_with('2') {
+        return None;
+    }
 
-    let mut resp = match resp {
-        Ok(r) => r,
-        Err(ureq::Error::StatusCode(429)) => {
-            let _ = fs::write(&lock_file, format!("{}", now + 300));
-            return Err(());
-        }
-        Err(_) => return Err(()),
-    };
-
-    let body: UsageResponse = resp.body_mut().read_json().map_err(|_| ())?;
+    let body: UsageResponse = serde_json::from_str(body_str).ok()?;
 
     let fh = body.five_hour.unwrap_or(UsagePeriod {
         utilization: 0.0,
@@ -223,19 +227,28 @@ fn fetch_usage(now: u64) -> Result<(), ()> {
         used_credits: 0.0,
     });
 
+    let util_5h = fh.utilization.round() as i32;
+    let util_7d = sd.utilization.round() as i32;
+    let extra_used = format!("{:.2}", eu.used_credits / 100.0);
+
     let cache_content = format!(
-        "TIMESTAMP={}\nUTILIZATION={}\nRESETS_AT={}\nWEEKLY_UTILIZATION={}\nWEEKLY_RESETS_AT={}\nEXTRA_ENABLED={}\nEXTRA_USED={:.2}",
-        now,
-        fh.utilization.round() as i32,
+        "TIMESTAMP={now}\nUTILIZATION={util_5h}\nRESETS_AT={}\nWEEKLY_UTILIZATION={util_7d}\nWEEKLY_RESETS_AT={}\nEXTRA_ENABLED={}\nEXTRA_USED={extra_used}",
         fh.resets_at,
-        sd.utilization.round() as i32,
         sd.resets_at,
         if eu.is_enabled { 1 } else { 0 },
-        eu.used_credits / 100.0,
     );
 
     let _ = fs::write(dir.join("usage.cache"), cache_content);
-    Ok(())
+
+    Some(UsageCache {
+        timestamp: now,
+        utilization: Some(util_5h),
+        resets_at: fh.resets_at,
+        weekly_utilization: Some(util_7d),
+        weekly_resets_at: sd.resets_at,
+        extra_enabled: eu.is_enabled,
+        extra_used,
+    })
 }
 
 fn build_bar(util: i32) -> String {
@@ -245,41 +258,78 @@ fn build_bar(util: i32) -> String {
     let has_half = half_steps % 2;
     let empty = 10 - full - has_half;
 
-    let full_chars: String = BAR_FULL.chars().take(full).collect();
-    let empty_chars: String = BAR_EMPTY.chars().take(empty).collect();
-
-    let mut bar = format!(" {full_chars}");
+    let mut bar = String::with_capacity(1 + 10 * BYTES_PER_BLOCK);
+    bar.push(' ');
+    bar.push_str(unsafe { std::str::from_utf8_unchecked(&BAR_FULL[..full * BYTES_PER_BLOCK]) });
     if has_half == 1 {
         bar.push_str(BAR_HALF);
     }
-    bar.push_str(&empty_chars);
+    bar.push_str(unsafe { std::str::from_utf8_unchecked(&BAR_EMPTY[..empty * BYTES_PER_BLOCK]) });
     bar
 }
 
 fn insert_pace_marker(bar: &str, remaining: i64, window: i64) -> String {
     let elapsed = window - remaining;
     let marker_pos = ((elapsed * 10 + window / 2) / window).clamp(0, 9) as usize;
-    let pos = marker_pos + 1;
+    let target = marker_pos + 1;
 
-    let chars: Vec<char> = bar.chars().collect();
-    let mut result = String::with_capacity(chars.len() * 4);
-    for (i, &c) in chars.iter().enumerate() {
-        if i == pos {
+    let bytes = bar.as_bytes();
+    let mut result = String::with_capacity(bar.len() + 3);
+    let mut char_idx = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let byte_len = utf8_char_len(bytes[i]);
+        if char_idx == target {
             result.push('┃');
+            i += byte_len;
         } else {
-            result.push(c);
+            result.push_str(&bar[i..i + byte_len]);
+            i += byte_len;
         }
+        char_idx += 1;
     }
     result
+}
+
+fn utf8_char_len(first_byte: u8) -> usize {
+    match first_byte {
+        0..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        _ => 4,
+    }
 }
 
 fn parse_reset_epoch(iso: &str) -> Option<i64> {
     if iso.len() < 19 {
         return None;
     }
-    chrono::NaiveDateTime::parse_from_str(&iso[..19], "%Y-%m-%dT%H:%M:%S")
-        .ok()
-        .map(|ndt| ndt.and_utc().timestamp())
+    let b = iso.as_bytes();
+
+    let year = parse_digits::<i32>(&b[0..4])?;
+    let month = parse_digits::<u32>(&b[5..7])?;
+    let day = parse_digits::<u32>(&b[8..10])?;
+    let hour = parse_digits::<u32>(&b[11..13])?;
+    let min = parse_digits::<u32>(&b[14..16])?;
+    let sec = parse_digits::<u32>(&b[17..19])?;
+
+    let epoch = utc_to_epoch(year, month, day, hour, min, sec);
+    Some(epoch)
+}
+
+fn parse_digits<T: std::str::FromStr>(bytes: &[u8]) -> Option<T> {
+    std::str::from_utf8(bytes).ok()?.parse().ok()
+}
+
+fn utc_to_epoch(year: i32, month: u32, day: u32, hour: u32, min: u32, sec: u32) -> i64 {
+    let mut y = year as i64;
+    let mut m = month as i64;
+    if m <= 2 {
+        y -= 1;
+        m += 12;
+    }
+    let era_day = 365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + day as i64 - 719469;
+    era_day * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64
 }
 
 fn round_epoch_to_minute(epoch: i64) -> i64 {
@@ -291,18 +341,50 @@ fn round_epoch_to_minute(epoch: i64) -> i64 {
     }
 }
 
-fn format_time_hm(epoch: i64) -> Option<String> {
-    Local
-        .timestamp_opt(epoch, 0)
-        .single()
-        .map(|dt| dt.format("%H:%M").to_string())
+#[cfg(unix)]
+#[repr(C)]
+struct Tm {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+    tm_gmtoff: i64,
+    tm_zone: *const i8,
 }
 
-fn format_time_day_hm(epoch: i64) -> Option<String> {
-    Local
-        .timestamp_opt(epoch, 0)
-        .single()
-        .map(|dt| dt.format("%a %H:%M").to_string())
+#[cfg(unix)]
+unsafe extern "C" {
+    fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+}
+
+fn format_time_local(epoch: i64, include_day: bool) -> Option<String> {
+    #[cfg(unix)]
+    {
+        use std::mem::MaybeUninit;
+        let mut tm = MaybeUninit::<Tm>::uninit();
+        let result = unsafe { localtime_r(&epoch, tm.as_mut_ptr()) };
+        if result.is_null() {
+            return None;
+        }
+        let tm = unsafe { tm.assume_init() };
+        if include_day {
+            let days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+            let day_name = days.get(tm.tm_wday as usize).unwrap_or(&"???");
+            Some(format!("{} {:02}:{:02}", day_name, tm.tm_hour, tm.tm_min))
+        } else {
+            Some(format!("{:02}:{:02}", tm.tm_hour, tm.tm_min))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (epoch, include_day);
+        None
+    }
 }
 
 fn get_git_branch() -> Option<String> {
@@ -408,7 +490,7 @@ fn main() {
             if SHOW_RESET_TIME {
                 if let Some(re) = reset_epoch {
                     let rounded = round_epoch_to_minute(re);
-                    if let Some(display) = format_time_hm(rounded) {
+                    if let Some(display) = format_time_local(rounded, false) {
                         seg.push(' ');
                         seg.push_str(&display);
                     }
@@ -440,7 +522,7 @@ fn main() {
             if SHOW_RESET_TIME {
                 if let Some(re) = reset_epoch {
                     let rounded = round_epoch_to_minute(re);
-                    if let Some(display) = format_time_day_hm(rounded) {
+                    if let Some(display) = format_time_local(rounded, true) {
                         seg.push(' ');
                         seg.push_str(&display);
                     }
