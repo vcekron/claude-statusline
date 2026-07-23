@@ -233,6 +233,10 @@ fn fetch_usage(now: u64) -> Option<UsageCache> {
         used_credits: 0.0,
     });
 
+    if fh.resets_at.is_empty() || sd.resets_at.is_empty() {
+        return None;
+    }
+
     let util_5h = fh.utilization.round() as i32;
     let util_7d = sd.utilization.round() as i32;
     let extra_used = format!("{:.2}", eu.used_credits / 100.0);
