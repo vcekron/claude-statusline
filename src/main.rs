@@ -16,8 +16,8 @@ const SHOW_RESET_TIME: bool = true;
 const SHOW_WEEKLY: bool = true;
 const SHOW_EXTRA_USAGE: bool = true;
 const CURRENCY_SYMBOL: &str = "€";
-const CACHE_MAX_AGE: u64 = 180;
-const STALE_THRESHOLD_SECS: u64 = 300;
+const CACHE_MAX_AGE: u64 = 90;
+const STALE_THRESHOLD_SECS: u64 = 225;
 const STALE_MARKER: &str = " ⚠";
 const SEP: &str = " │ ";
 
