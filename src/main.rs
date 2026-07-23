@@ -14,9 +14,11 @@ const SHOW_PROGRESS_BAR: bool = true;
 const SHOW_PACE_MARKER: bool = true;
 const SHOW_RESET_TIME: bool = true;
 const SHOW_WEEKLY: bool = true;
-const SHOW_EXTRA_USAGE: bool = false;
+const SHOW_EXTRA_USAGE: bool = true;
 const CURRENCY_SYMBOL: &str = "€";
 const CACHE_MAX_AGE: u64 = 180;
+const STALE_THRESHOLD_SECS: u64 = 300;
+const STALE_MARKER: &str = " ⚠";
 const SEP: &str = " │ ";
 
 const BAR_FULL: &[u8] = "██████████".as_bytes();
@@ -132,6 +134,10 @@ fn parse_cache_file(contents: &str) -> UsageCache {
         }
     }
     cache
+}
+
+fn is_stale(cache: &UsageCache, now: u64) -> bool {
+    cache.timestamp == 0 || now.saturating_sub(cache.timestamp) > STALE_THRESHOLD_SECS
 }
 
 fn read_cache(now: u64) -> UsageCache {
@@ -444,6 +450,7 @@ fn main() {
 
     let cu = input.context_window.current_usage.unwrap_or_default();
     let cache = read_cache(now);
+    let usage_stale = is_stale(&cache, now);
 
     let mut segments: Vec<String> = Vec::new();
 
@@ -497,6 +504,10 @@ fn main() {
                 }
             }
 
+            if usage_stale {
+                seg.push_str(STALE_MARKER);
+            }
+
             segments.push(seg);
         }
     }
@@ -529,12 +540,20 @@ fn main() {
                 }
             }
 
+            if usage_stale {
+                seg.push_str(STALE_MARKER);
+            }
+
             segments.push(seg);
         }
     }
 
-    if SHOW_EXTRA_USAGE && cache.extra_enabled && !cache.extra_used.is_empty() {
-        segments.push(format!("{CURRENCY_SYMBOL}{}", cache.extra_used));
+    if SHOW_EXTRA_USAGE && cache.extra_enabled && cache.extra_used != "0.00" {
+        let mut seg = format!("{CURRENCY_SYMBOL}{}", cache.extra_used);
+        if usage_stale {
+            seg.push_str(STALE_MARKER);
+        }
+        segments.push(seg);
     }
 
     println!("{}", segments.join(SEP));
