@@ -7,7 +7,7 @@ This is a personal tool. It's not flexible, not user-friendly, and configured vi
 ## What it shows
 
 ```
-workspace │ Opus 4.6 │ 18% │ 28% ██▓░┃░░░░░ 05:00 │ 3% ┃░░░░░░░░░ Sat 00:00 │ €17.89
+workspace │ Opus 4.8 │ 8% │ 10% █░░░░░┃░░░ 21:20 │ 14% █░░░░░┃░░░ Sun 23:00 │ €25.96
 ```
 
 - **Directory** — current working directory name
